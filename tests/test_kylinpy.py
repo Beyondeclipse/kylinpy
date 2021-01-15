@@ -1,169 +1,133 @@
-import os
-import json
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 import pytest
-from mock import patch
-from kylinpy import kylinpy
-from kylinpy.errors import (  # noqa
-    KylinUnauthorizedError,
-    KylinUserDisabled,
-    KylinConnectionError,
-    KylinError,
-    KylinConfusedResponse,
-    KAPOnlyError
-)
+
+from kylinpy.job import KylinJob
+from kylinpy.kylinpy import create_kylin, SERVICES
+from kylinpy.client import Client
+from kylinpy.exceptions import NoSuchTableError
 
 
-class MockResponse(object):
-    def __init__(self, json_data):
-        self.json_data = json.dumps(json_data, sort_keys=True)
+class TestProject(object):
+    @property
+    def project(self):
+        return create_kylin('kylin://username:password@example/foobar')
 
-    def close(self):
-        pass
+    def test_init(self):
+        cluster = create_kylin('kylin://name@45中文:pwd12@%+@example.com:9000/foobar')
+        assert cluster.host == 'example.com'
+        assert cluster.port == 9000
+        assert cluster.username == 'name@45中文'
+        assert cluster.password == 'pwd12@%+'
+        assert cluster.is_ssl is False
+        assert cluster.prefix == '/kylin/api'
+        assert cluster.timeout == 30
+        assert cluster.unverified is True
+        assert cluster.version == 'v1'
+        assert cluster.is_pushdown is False
+        assert cluster.is_pushdown is False
+        assert cluster.is_debug is False
+        assert cluster.scheme == 'http'
+        assert cluster.project == 'foobar'
 
-    def getcode(self):
-        pass
+    def test_service(self):
+        cluster = create_kylin('kylin://foo:bar@example.com:9000/foobar?prefix=/aaa/bbb')
+        assert isinstance(cluster.service, SERVICES['v1'])
+        assert cluster.service.client.request_headers.get('Accept') is None
+        assert cluster.service.client.request_headers.get('Authorization') == 'Basic Zm9vOmJhcg=='
+        assert cluster.service.project == 'foobar'
+        assert cluster.version == 'v1'
+        cluster.username = 'yongjie'
+        cluster.password = 'zhao'
+        cluster.host = 'eager_host.com'
+        cluster.port = 1234
+        cluster.scheme = 'https'
+        cluster.timeout = 1000
+        cluster.unverified = False
+        cluster.prefix = '/hello/world'
+        cluster.is_debug = True
+        eager_client = cluster.service.client
+        assert eager_client.host == 'https://eager_host.com:1234'
+        assert eager_client.prefix == '/hello/world'
+        assert eager_client.unverified is False
+        assert eager_client.timeout == 1000
+        assert eager_client.is_debug is True
+        assert cluster.service.client.request_headers.get('Authorization') == 'Basic eW9uZ2ppZTp6aGFv'
 
-    def read(self):
-        return self.json_data
+        cluster2 = create_kylin('kylin://foo:bar@example.com:9000/?version=v2')
+        assert cluster2.version == 'v2'
+        assert cluster2.service.client.request_headers.get('Accept') == 'application/vnd.apache.kylin-v2+json'
+        assert isinstance(cluster2.service, SERVICES['v2'])
 
+        cluster4 = create_kylin('kylin://foo:bar@example.com:9000/?version=v4')
+        assert cluster4.version == 'v4'
+        assert cluster4.service.client.request_headers.get('Accept') == 'application/vnd.apache.kylin-v4-public+json'
+        assert isinstance(cluster4.service, SERVICES['v4'])
 
-@patch('six.moves.urllib.request.urlopen')
-def test_authentication(response):
-    response.side_effect = [
-        MockResponse({'userDetails': {'authorities': {}}}),
-        MockResponse({'data': {'authorities': {}}, 'code': 000, 'msg': ''})
-    ]
-    v1 = kylinpy.Kylinpy('host', 'username', 'password', version='v1').authentication()
-    v2 = kylinpy.Kylinpy('host', 'username', 'password', version='v2').authentication()
-    assert v1 == v2
+    def test_get_client(self):
+        cluster = create_kylin('kylin://username:password@example')
+        assert isinstance(cluster._get_client(), Client)
 
+    def test_basic_auth_dump(self):
+        cluster = create_kylin('kylin://username:password@example')
+        assert cluster.basic_auth_dump('foo', 'bar') == {'Authorization': 'Basic Zm9vOmJhcg=='}
 
-@patch('six.moves.urllib.request.urlopen')
-def test_projects(response):
-    response.side_effect = [
-        MockResponse([]),
-        MockResponse({'data': {'projects': []}, 'code': 000, 'msg': ''})
-    ]
-    v1 = kylinpy.Kylinpy('host', 'username', 'password', version='v1').projects()
-    v2 = kylinpy.Kylinpy('host', 'username', 'password', version='v2').projects()
-    assert v1 == v2
+    def test_query(self, v1_api):
+        rv = self.project.query('select count(*) from kylin_sales')
+        assert 'columnMetas' in rv
+        assert rv['results'] == [['10000']]
 
+    def test_get_all_tables(self, v1_api):
+        assert self.project.get_all_tables() == [
+            'KYLIN_ACCOUNT',
+            'KYLIN_CAL_DT',
+            'KYLIN_CATEGORY_GROUPINGS',
+            'KYLIN_COUNTRY',
+            'KYLIN_SALES',
+        ]
 
-@patch('six.moves.urllib.request.urlopen')
-def test_query(response):
-    response.side_effect = [
-        MockResponse({}),
-        MockResponse({'data': {}, 'code': 000, 'msg': ''})
-    ]
-    v1 = kylinpy.Kylinpy('host', 'username', 'password', version='v1').query('sql')
-    v2 = kylinpy.Kylinpy('host', 'username', 'password', version='v2').query('sql')
-    assert v1 == v2
+        pushdown = create_kylin('kylin://username:password@example/foobar?is_pushdown=1')
+        assert pushdown.is_pushdown is True
+        assert pushdown.get_all_tables() == [
+            'KYLIN_ACCOUNT',
+            'KYLIN_CAL_DT',
+            'KYLIN_CATEGORY_GROUPINGS',
+            'KYLIN_COUNTRY',
+            'KYLIN_SALES',
+            'KYLIN_STREAMING_TABLE',
+        ]
 
+    def test_get_all_schema(self, v1_api):
+        assert self.project.get_all_schemas() == ['DEFAULT']
 
-@patch('six.moves.urllib.request.urlopen')
-def test_tables_and_columns(response):
-    response.side_effect = [
-        MockResponse([]),
-        MockResponse({'data': [], 'code': 000, 'msg': ''})
-    ]
-    v1 = kylinpy.Kylinpy('host', 'username', 'password', version='v1').tables_and_columns()
-    v2 = kylinpy.Kylinpy('host', 'username', 'password', version='v2').tables_and_columns()
-    assert v1 == v2
+    def test_get_table_source(self, v1_api):
+        table = self.project.get_table_source('KYLIN_SALES', 'DEFAULT')
+        assert table.name == 'KYLIN_SALES'
+        assert table.schema == 'DEFAULT'
 
+    def test_get_table_source_with_schema(self, v1_api):
+        table = self.project.get_table_source('DEFAULT.KYLIN_SALES')
+        assert table.name == 'KYLIN_SALES'
+        assert table.schema == 'DEFAULT'
 
-@patch('six.moves.urllib.request.urlopen')
-def test_tables(response):
-    response.side_effect = [
-        MockResponse({}),
-        MockResponse({'data': {}, 'code': 000, 'msg': ''})
-    ]
-    v1 = kylinpy.Kylinpy('host', 'username', 'password', version='v1').tables()
-    v2 = kylinpy.Kylinpy('host', 'username', 'password', version='v2').tables()
-    assert v1 == v2
+    def test_get_table_source_error(self, v1_api):
+        with pytest.raises(NoSuchTableError):
+            self.project.get_table_source('foo.bar.zee.hello.world')
 
+    def test_get_cube_source(self, v1_api):
+        cube = self.project.get_cube_source('kylin_sales_cube')
+        assert cube.name == 'kylin_sales_cube'
+        assert cube.model_name == 'kylin_sales_model'
 
-@patch('six.moves.urllib.request.urlopen')
-def test_cubes(response):
-    response.side_effect = [
-        MockResponse([]),
-        MockResponse({'data': {'cubes': []}, 'code': 000, 'msg': ''})
-    ]
+    def test_get_datasource(self, v1_api):
+        cube = self.project.get_cube_source('kylin_sales_cube')
+        assert cube.name == 'kylin_sales_cube'
+        assert cube.model_name == 'kylin_sales_model'
 
-    v1 = kylinpy.Kylinpy('host', 'username', 'password', version='v1').cubes()
-    v2 = kylinpy.Kylinpy('host', 'username', 'password', version='v2').cubes()
-    assert v1 == v2
-
-
-@patch('six.moves.urllib.request.urlopen')
-def test_cube_sql(response):
-    with pytest.raises(KAPOnlyError):
-        kylinpy.Kylinpy('host', 'username', 'password', version='v1').cube_sql('cube_name')
-
-    response.side_effect = [
-        MockResponse({'data': {'sql': ''}, 'code': 000, 'msg': ''})
-    ]
-    v2 = kylinpy.Kylinpy('host', 'username', 'password', version='v2').cube_sql('cube_name')
-    assert v2 == {'data': {'sql': ''}}
-
-
-@patch('six.moves.urllib.request.urlopen')
-def test_cube_desc(response):
-    response.side_effect = [
-        MockResponse({}),
-        MockResponse({'data': {'cube': {}}, 'code': 000, 'msg': ''})
-    ]
-
-    v1 = kylinpy.Kylinpy('host', 'username', 'password', version='v1').cube_desc('cube_name')
-    v2 = kylinpy.Kylinpy('host', 'username', 'password', version='v2').cube_desc('cube_name')
-    assert v1 == v2
-
-
-@patch('six.moves.urllib.request.urlopen')
-def test_users(response):
-    with pytest.raises(KAPOnlyError):
-        kylinpy.Kylinpy('host', 'username', 'password', version='v1').users()
-
-    response.side_effect = [
-        MockResponse({'data': {'users': []}, 'code': 000, 'msg': ''})
-    ]
-    v2 = kylinpy.Kylinpy('host', 'username', 'password', version='v2').users()
-    assert v2 == {'data': []}
-
-
-@patch('six.moves.urllib.request.urlopen')
-def test_model_desc(response):
-    response.side_effect = [
-        MockResponse([{'name': 'model_name'}]),
-        MockResponse({'data': {'model': {'name': 'model_name'}}, 'code': 000, 'msg': ''})
-    ]
-
-    v1 = kylinpy.Kylinpy('host', 'username', 'password', version='v1').model_desc('model_name')
-    v2 = kylinpy.Kylinpy('host', 'username', 'password', version='v2').model_desc('model_name')
-    assert v1 == v2
-
-
-# =================================================
-
-
-@patch('six.moves.urllib.request.urlopen')
-def test_get_table_names(response):
-    response.side_effect = [
-        MockResponse([{'table_NAME': 'table1'}]),
-        MockResponse({'data': [{'table_NAME': 'table1'}], 'code': 000, 'msg': ''})
-    ]
-    v1 = kylinpy.Kylinpy('host', 'username', 'password', version='v1').get_table_names()
-    v2 = kylinpy.Kylinpy('host', 'username', 'password', version='v2').get_table_names()
-    assert v1 == v2
-
-
-@patch('six.moves.urllib.request.urlopen')
-def test_list_schemas(response):
-    response.side_effect = [
-        MockResponse([{'table_NAME': 'table1', 'table_SCHEM': 'schema1'}]),
-        MockResponse({'data': [{'table_NAME': 'table1', 'table_SCHEM': 'schema1'}], 'code': 000, 'msg': ''})
-    ]
-    v1 = kylinpy.Kylinpy('host', 'username', 'password', version='v1').list_schemas()
-    v2 = kylinpy.Kylinpy('host', 'username', 'password', version='v2').list_schemas()
-    assert v1 == v2
-
+    def test_list_job(self, v1_api):
+        job_list = self.project.list_job()
+        assert isinstance(job_list[0], KylinJob)

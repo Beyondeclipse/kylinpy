@@ -1,15 +1,20 @@
+# -*- coding: utf-8 -*-
 from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
-import re
 import itertools
 
+import sqlalchemy.exc
 from sqlalchemy import pool
-from sqlalchemy.sql import compiler
 from sqlalchemy.engine import default
+from sqlalchemy.sql import compiler
 
-from .kylindb import KylinDB
-from .utils.sqla_types import kylin_to_sqla
-from .utils.keywords import CALCITE_KEYWORDS
+from kylinpy.exceptions import NoSuchTableError
+from kylinpy.kylindb import Connection
+from kylinpy.utils.keywords import CALCITE_KEYWORDS
+from kylinpy.utils.sqla_types import kylin_to_sqla
 
 SUPERSET_KEYWORDS = set([
     '__timestamp',
@@ -17,15 +22,14 @@ SUPERSET_KEYWORDS = set([
 
 
 class KylinIdentifierPreparer(compiler.IdentifierPreparer):
-    compiler.IdentifierPreparer.reserved_words = set(
-        itertools.chain(*[[e.lower(), e] for e in CALCITE_KEYWORDS])
-    )
+    compiler.IdentifierPreparer.reserved_words = \
+        set(itertools.chain(*[[e.lower(), e] for e in CALCITE_KEYWORDS]))
     compiler.IdentifierPreparer.reserved_words.update(SUPERSET_KEYWORDS)
 
     def __init__(self, dialect, initial_quote='"',
                  final_quote=None, escape_quote='"', omit_schema=True):
         super(KylinIdentifierPreparer, self).__init__(
-            dialect, initial_quote, final_quote, escape_quote, omit_schema
+            dialect, initial_quote, final_quote, escape_quote, omit_schema,
         )
 
     def format_label(self, label, name=None):
@@ -54,6 +58,9 @@ class KylinSQLCompiler(compiler.SQLCompiler):
 
 
 class KylinDialect(default.DefaultDialect):
+    def get_primary_keys(self, connection, table_name, schema=None, **kw):
+        pass
+
     name = 'kylin'
     driver = 'kylin'
 
@@ -77,7 +84,7 @@ class KylinDialect(default.DefaultDialect):
 
     @classmethod
     def dbapi(cls):
-        return KylinDB
+        return Connection
 
     def initialize(self, connection):
         self.server_version_info = None
@@ -86,35 +93,36 @@ class KylinDialect(default.DefaultDialect):
         self.returns_unicode_strings = True
 
     def create_connect_args(self, url):
-        args = {
+        kwargs = {
+            'host': url.host,
+            'port': url.port or 7070,
             'username': url.username,
             'password': url.password,
-            'host': url.host,
-            'port': url.port,
-            'project': re.sub('/$', '', url.database or 'default'),
-            'session': url.query.get('session'),
-            'version': url.query.get('version'),
-            'prefix': url.query.get('prefix'),
+            'project': url.database or 'default',
         }
-        return [], dict([e for e in args.items() if e[1]])
+        kwargs.update(url.query)
+        if 'is_ssl' in kwargs:
+            if kwargs['is_ssl'] in ['1', 'true', 'True', True]:
+                kwargs.update({'is_ssl': True})
+            else:
+                kwargs.update({'is_ssl': False})
+        return [[], kwargs]
 
     def do_execute(self, cursor, statement, parameters, context=None):
-        cursor.execute(statement, parameters,
-                       labels=self.statement_compiler._cached_metadata)
-        self.statement_compiler._cached_metadata = set()
+        super(KylinDialect, self).do_execute(cursor, statement, parameters, context)
 
     def get_table_names(self, connection, schema=None, **kw):
         conn = connection.connect()
-        source = conn.engine.url.query.get('source', 'table')
-        if source == 'cube':
-            return conn.connection.connection.get_cube_names().get('data')
-        return conn.connection.connection.get_table_names().get('data')
+        tables = conn.connection.connection.get_all_tables(schema)
+        return tables
 
     def get_schema_names(self, connection, schema=None, **kw):
         conn = connection.connect()
-        return conn.connection.connection.list_schemas().get('data')
+        schemas = conn.connection.connection.get_all_schemas()
+        return schemas
 
     def has_table(self, connection, table_name, schema=None):
+        # disable check table exists
         return False
 
     def has_sequence(self, connection, sequence_name, schema=None):
@@ -122,12 +130,14 @@ class KylinDialect(default.DefaultDialect):
 
     def get_columns(self, connection, table_name, schema=None, **kw):
         conn = connection.connect()
-        columns = conn.connection.connection.get_table_columns(
-            table_name).get('data')
-        return [{
-            'name': col['column_NAME'],
-            'type': kylin_to_sqla(col['datatype'])
-        } for col in columns]
+        try:
+            columns = conn.connection.connection.get_table_source(table_name, schema).columns
+            return [{
+                'name': col.name,
+                'type': kylin_to_sqla(col.datatype),
+            } for col in columns]
+        except NoSuchTableError:
+            raise sqlalchemy.exc.NoSuchTableError
 
     def get_foreign_keys(self, connection, table_name, schema=None, **kw):
         return []
